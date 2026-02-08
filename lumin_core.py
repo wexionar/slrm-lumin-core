@@ -1,10 +1,10 @@
-# ============================================================
+# =============================================================
 # Project: SLRM-nD (Lumin Core v2.0)
 # Optimized Simplex Interpolation Engine
 # Project Lead: Alex Kinetic
 # AI Collaboration: Gemini · ChatGPT · Claude · Grok · Meta AI
 # License: MIT
-# ============================================================
+# =============================================================
 
 import numpy as np
 import time
