@@ -1,24 +1,25 @@
-# SLRM Lumin Core v2.0
+# SLRM Lumin Core v2.1
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Python 3.8+](https://img.shields.io/badge/python-3.8+-blue.svg)](https://www.python.org/downloads/)
 [![NumPy](https://img.shields.io/badge/numpy-required-orange.svg)](https://numpy.org/)
 
-**High-Dimensional Simplex Interpolation Engine with Automatic Extrapolation Detection**
+**High-Dimensional Simplex Local Regression with Automatic Extrapolation Detection**
 
-SLRM (Simplex Localized Regression Model) Lumin Core is a lightweight, efficient interpolation engine designed for high-dimensional spaces. It uses geometric simplex encapsulation to provide fast, accurate predictions while automatically detecting and rejecting extrapolation attempts.
+SLRM (Simplex Localized Regression Model) Lumin Core is a lightweight, efficient interpolation engine designed for high-dimensional spaces. It uses geometric simplex encapsulation with local linear regression to provide fast, accurate predictions while automatically detecting and rejecting extrapolation attempts.
 
 ---
 
 ## 🌟 Key Features
 
-- ✅ **No Extrapolation by Design**: Automatically detects and rejects queries outside dataset bounds
+- ✅ **No Extrapolation by Design**: Automatically detects and rejects queries outside dataset bounds (sacred boundaries, no epsilon tolerance)
+- 🎯 **Simplex Local Regression (SLR)**: Fits local hyperplanes through simplex nodes for improved accuracy on smooth functions
+- 🔄 **Intelligent Fallback**: Automatic degeneracy detection with IDW fallback for stability
+- 📊 **Diagnostic Information**: Optional uncertainty metrics, method selection, and quality indicators
 - 🚀 **High-Dimensional Optimization**: Vectorized O(D) complexity for real-time performance
-- 🎯 **Simplex-Based Interpolation**: Geometric approach using minimal enclosing simplexes
-- 📊 **Robust IDW Algorithm**: Inverse Distance Weighting for stable predictions
-- 🧪 **Comprehensive Test Suite**: 33 validation tests covering edge cases
-- 💾 **Batch Processing**: Efficient multi-point prediction support
-- 📈 **Built-in Evaluation**: MSE, MAE, RMSE metrics included
+- ⚡ **KD-Tree Acceleration**: Automatic activation for datasets with N > 10,000 points
+- 🧪 **Comprehensive Test Suite**: 39 validation tests covering edge cases and new features
+- 💾 **Batch Processing**: Efficient multi-point prediction with diagnostic support
 
 ---
 
@@ -27,6 +28,7 @@ SLRM (Simplex Localized Regression Model) Lumin Core is a lightweight, efficient
 ### Requirements
 - Python 3.8+
 - NumPy
+- SciPy (optional, for KD-Tree acceleration with large datasets)
 
 ### Quick Install
 
@@ -37,6 +39,9 @@ cd slrm-lumin-core
 
 # Install dependencies
 pip install numpy
+
+# Optional: Install scipy for KD-Tree support
+pip install scipy
 ```
 
 ---
@@ -138,21 +143,31 @@ engine.fit(data)
 
 ---
 
-### `predict(point: np.ndarray, allow_extrapolation: bool = False) -> Optional[float]`
+### `predict(point: np.ndarray, allow_extrapolation: bool = False, return_diagnostics: bool = False)`
 
 Predict value at a single query point.
 
 **Parameters:**
 - `point`: Query point of shape `(D,)`
 - `allow_extrapolation`: If `False` (default), returns `None` for out-of-bounds points
+- `return_diagnostics`: If `True`, returns `(prediction, diagnostics_dict)` **[NEW in v2.1]**
 
 **Returns:**
-- Predicted value or `None` if extrapolation detected
+- If `return_diagnostics=False`: Predicted value or `None`
+- If `return_diagnostics=True`: `(prediction, diagnostics)` where diagnostics contains:
+  - `'method'`: `'slr'` | `'idw_fallback'` - which method was used
+  - `'uncertainty'`: Mean distance to simplex nodes (lower is better)
+  - `'simplex_size'`: Number of nodes in the simplex
+  - `'is_degenerate'`: Whether simplex was degenerate
 
 **Example:**
 ```python
-pred = engine.predict([0.5, 0.5])  # Returns predicted value
-pred = engine.predict([10, 10])    # Returns None if out of bounds
+# Simple prediction
+pred = engine.predict([0.5, 0.5])
+
+# With diagnostics (v2.1)
+pred, diag = engine.predict([0.5, 0.5], return_diagnostics=True)
+print(f"Method: {diag['method']}, Uncertainty: {diag['uncertainty']:.4f}")
 ```
 
 ---
@@ -192,7 +207,10 @@ Dictionary with metrics:
     'MAE': float,           # Mean Absolute Error
     'RMSE': float,          # Root Mean Squared Error
     'valid_predictions': int,  # Number of valid (non-extrapolated) predictions
-    'total_points': int     # Total test points
+    'total_points': int,    # Total test points
+    'slr_usage': int,       # Number of predictions using SLR [NEW in v2.1]
+    'idw_usage': int,       # Number of predictions using IDW fallback [NEW in v2.1]
+    'mean_uncertainty': float  # Average uncertainty across predictions [NEW in v2.1]
 }
 ```
 
@@ -200,7 +218,8 @@ Dictionary with metrics:
 ```python
 metrics = engine.evaluate(test_data)
 print(f"RMSE: {metrics['RMSE']:.4f}")
-print(f"Valid: {metrics['valid_predictions']}/{metrics['total_points']}")
+print(f"SLR used: {metrics['slr_usage']}/{metrics['valid_predictions']}")
+print(f"Mean uncertainty: {metrics['mean_uncertainty']:.4f}")
 ```
 
 ---
@@ -230,24 +249,28 @@ python lumin_core_test.py
 ```
 
 **Test Coverage:**
-- ✅ 33 tests across 8 categories
+- ✅ 39 tests across 9 categories
 - ✅ Initialization & data loading
 - ✅ Extrapolation detection
 - ✅ Prediction accuracy
 - ✅ Batch processing
 - ✅ Edge cases (1D, 500D, duplicates, etc.)
 - ✅ Performance benchmarks
+- ✅ **NEW**: SLR vs IDW method selection
+- ✅ **NEW**: Diagnostic API validation
+- ✅ **NEW**: Degeneracy detection
+- ✅ **NEW**: KD-Tree initialization
 
 Expected output:
 ```
 🔷🔷🔷🔷🔷🔷🔷🔷🔷🔷🔷🔷🔷🔷🔷🔷🔷🔷🔷🔷
-LUMIN CORE v2.0 - VALIDATION TEST SUITE
+LUMIN CORE v2.1 - VALIDATION TEST SUITE
 🔷🔷🔷🔷🔷🔷🔷🔷🔷🔷🔷🔷🔷🔷🔷🔷🔷🔷🔷🔷
 
 ...
 
 ======================================================================
-TOTAL: 33/33 tests passed
+TOTAL: 39/39 tests passed
 🎉 ALL TESTS PASSED! 🎉
 ======================================================================
 ```
@@ -302,7 +325,34 @@ print(f"RMSE: {metrics['RMSE']:.2f}")
 print(f"Valid predictions: {metrics['valid_predictions']}/20")
 ```
 
-### Example 3: Handling Extrapolation
+### Example 3: Using Diagnostics (v2.1 Feature)
+
+```python
+import numpy as np
+from lumin_core import LuminCore
+
+# Dataset
+data = np.array([
+    [0, 0, 0],
+    [0, 1, 1],
+    [1, 0, 1],
+    [1, 1, 2]
+])
+
+engine = LuminCore(dimensions=2)
+engine.fit(data)
+
+# Predict with diagnostics
+pred, diag = engine.predict([0.5, 0.5], return_diagnostics=True)
+
+print(f"Prediction: {pred:.4f}")
+print(f"Method used: {diag['method']}")  # 'slr' or 'idw_fallback'
+print(f"Uncertainty: {diag['uncertainty']:.4f}")
+print(f"Simplex size: {diag['simplex_size']}")
+print(f"Is degenerate: {diag['is_degenerate']}")
+```
+
+### Example 4: Handling Extrapolation
 
 ```python
 import numpy as np
@@ -382,9 +432,29 @@ For a query point `q` in D-dimensional space:
    simplex = unique(simplex)
    ```
 
-### Inverse Distance Weighting
+### Simplex Local Regression (NEW in v2.1)
 
-Given simplex nodes `{(x₁, y₁), ..., (xₖ, yₖ)}`:
+Given simplex nodes `{(x₁, y₁), ..., (xₖ, yₖ)}`, fit a local hyperplane:
+
+```
+y = β₀ + β₁·x₁ + β₂·x₂ + ... + βₐ·xₐ
+```
+
+**Method:**
+1. Construct augmented matrix: `A = [1  x₁₁  x₁₂  ...  x₁ₐ]`
+                               `    [1  x₂₁  x₂₂  ...  x₂ₐ]`
+                               `    [⋮   ⋮    ⋮   ⋱    ⋮  ]`
+
+2. Solve least squares: `β = (AᵀA)⁻¹Aᵀy`
+
+3. Predict: `ŷ = β₀ + β₁·q₁ + ... + βₐ·qₐ`
+
+**Degeneracy Detection:**
+If nodes are nearly collinear (det(A) < 10⁻¹⁰), fallback to IDW.
+
+### Inverse Distance Weighting (Fallback)
+
+Used when simplex is degenerate:
 
 ```
 dᵢ = ||xᵢ - q||₂
@@ -474,7 +544,16 @@ print(f"Max bounds: {engine.bounds_max}")
 
 ## 📜 Version History
 
-### v2.0 (Current)
+### v2.1 (Current)
+- ✅ **Simplex Local Regression (SLR)**: Replaced IDW with local hyperplane fitting
+- ✅ **Intelligent Fallback**: Automatic degeneracy detection with IDW backup
+- ✅ **Diagnostic API**: Optional uncertainty, method, and quality metrics
+- ✅ **KD-Tree Acceleration**: Automatic for N > 10,000 (requires scipy)
+- ✅ **Enhanced Evaluate**: Method distribution and uncertainty reporting
+- ✅ **Sacred Boundaries**: Zero epsilon tolerance (no extrapolation penumbra)
+- ✅ **Extended Test Suite**: 39 comprehensive tests (was 33)
+
+### v2.0
 - ✅ Complete rewrite with optimized architecture
 - ✅ Automatic extrapolation detection
 - ✅ Batch prediction support
@@ -506,6 +585,12 @@ cd slrm-lumin-core
 pip install numpy
 python lumin_core_test.py  # Ensure all tests pass
 ```
+
+---
+
+## 🧠 SLRM Team
+
+Alex · Gemini · ChatGPT   Claude · Grok · Meta AI  
 
 ---
 
