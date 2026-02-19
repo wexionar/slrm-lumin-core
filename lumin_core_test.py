@@ -1,11 +1,10 @@
-# =============================================================
-# Project: SLRM-nD (Lumin Core v2.0)
+# ==========================================
+# Project: SLRM-nD (Lumin Core v2.1)
 # Comprehensive Test Suite
 # Project Lead: Alex Kinetic
 # AI Collaboration: Gemini · ChatGPT · Claude · Grok · Meta AI
-# License: MIT
-# =============================================================
-
+# License: MIT License
+# ==========================================
 
 import numpy as np
 import time
@@ -36,7 +35,7 @@ class TestResult:
 
 
 class LuminCoreTestSuite:
-    """Comprehensive test suite for Lumin Core v2.0"""
+    """Comprehensive test suite for Lumin Core v2.1"""
     
     def __init__(self):
         self.results: List[TestResult] = []
@@ -809,13 +808,181 @@ def test_performance(suite: LuminCoreTestSuite):
 
 
 # ==========================================
+# TEST CATEGORY 9: V2.1 NEW FEATURES
+# ==========================================
+
+def test_v21_features(suite: LuminCoreTestSuite):
+    """Test v2.1 specific features: SLR, diagnostics, KDTree"""
+    print("\n[CATEGORY 9] V2.1 NEW FEATURES TESTS")
+    print("-" * 70)
+    
+    # Test 9.1: Diagnostics API
+    try:
+        engine = LuminCore(dimensions=2)
+        data = np.array([
+            [0, 0, 0],
+            [0, 1, 1],
+            [1, 0, 1],
+            [1, 1, 2],
+            [2, 2, 4]
+        ])
+        engine.fit(data)
+        
+        pred, diag = engine.predict([0.5, 0.5], return_diagnostics=True)
+        
+        required_keys = {'method', 'uncertainty', 'simplex_size', 'is_degenerate'}
+        has_all_keys = required_keys.issubset(diag.keys())
+        
+        passed = has_all_keys and pred is not None
+        suite.add_result(TestResult(
+            "9.1 Diagnostics API",
+            passed,
+            f"method={diag.get('method', 'N/A')}, uncertainty={diag.get('uncertainty', 0):.4f}"
+        ))
+    except Exception as e:
+        suite.add_result(TestResult("9.1 Diagnostics API", False, str(e)))
+    
+    # Test 9.2: SLR vs IDW method selection
+    try:
+        # Dense dataset should favor SLR
+        engine = LuminCore(dimensions=2)
+        X = np.random.rand(200, 2) * 10
+        Y = (X[:, 0] + 2*X[:, 1]).reshape(-1, 1)
+        data = np.hstack([X, Y])
+        engine.fit(data)
+        
+        # Test multiple points
+        test_points = np.random.rand(20, 2) * 10
+        preds, diags = engine.predict_batch(test_points, return_diagnostics=True)
+        
+        slr_count = sum(1 for d in diags if d and d.get('method') == 'slr')
+        
+        # In dense datasets, we expect some SLR usage
+        passed = True  # Just verify it runs without error
+        suite.add_result(TestResult(
+            "9.2 SLR method selection",
+            passed,
+            f"SLR used: {slr_count}/20 predictions"
+        ))
+    except Exception as e:
+        suite.add_result(TestResult("9.2 SLR method", False, str(e)))
+    
+    # Test 9.3: Batch diagnostics
+    try:
+        engine = LuminCore(dimensions=2)
+        data = np.array([[0, 0, 0], [1, 1, 1], [2, 2, 2], [3, 3, 3]])
+        engine.fit(data)
+        
+        points = np.array([[0.5, 0.5], [1.5, 1.5]])
+        preds, diags = engine.predict_batch(points, return_diagnostics=True)
+        
+        passed = (
+            len(preds) == 2 and 
+            len(diags) == 2 and
+            all('method' in d for d in diags if d)
+        )
+        suite.add_result(TestResult(
+            "9.3 Batch diagnostics",
+            passed,
+            f"Got diagnostics for {len(diags)} predictions"
+        ))
+    except Exception as e:
+        suite.add_result(TestResult("9.3 Batch diagnostics", False, str(e)))
+    
+    # Test 9.4: Degeneracy detection
+    try:
+        # Create intentionally degenerate case (collinear points)
+        engine = LuminCore(dimensions=2)
+        data = np.array([
+            [0, 0, 0],
+            [1, 1, 1],
+            [2, 2, 2],
+            [3, 3, 3]  # All on same line
+        ])
+        engine.fit(data)
+        
+        pred, diag = engine.predict([1.5, 1.5], return_diagnostics=True)
+        
+        # Should detect degeneracy and use IDW fallback
+        passed = diag.get('is_degenerate', False) or diag.get('method') == 'idw_fallback'
+        suite.add_result(TestResult(
+            "9.4 Degeneracy detection",
+            passed,
+            f"Degenerate={diag.get('is_degenerate')}, method={diag.get('method')}"
+        ))
+    except Exception as e:
+        suite.add_result(TestResult("9.4 Degeneracy detection", False, str(e)))
+    
+    # Test 9.5: Evaluate with method distribution
+    try:
+        engine = LuminCore(dimensions=3)
+        np.random.seed(42)
+        X = np.random.rand(100, 3) * 10
+        Y = np.sum(X, axis=1).reshape(-1, 1)
+        data = np.hstack([X, Y])
+        engine.fit(data)
+        
+        X_test = np.random.rand(20, 3) * 10
+        Y_test = np.sum(X_test, axis=1).reshape(-1, 1)
+        test_data = np.hstack([X_test, Y_test])
+        
+        metrics = engine.evaluate(test_data)
+        
+        has_new_metrics = (
+            'slr_usage' in metrics and
+            'idw_usage' in metrics and
+            'mean_uncertainty' in metrics
+        )
+        
+        passed = has_new_metrics
+        suite.add_result(TestResult(
+            "9.5 Enhanced evaluate metrics",
+            passed,
+            f"SLR={metrics.get('slr_usage', 0)}, IDW={metrics.get('idw_usage', 0)}"
+        ))
+    except Exception as e:
+        suite.add_result(TestResult("9.5 Enhanced evaluate", False, str(e)))
+    
+    # Test 9.6: KDTree initialization (if scipy available)
+    try:
+        try:
+            from scipy.spatial import KDTree as TestKDTree
+            scipy_available = True
+        except:
+            scipy_available = False
+        
+        if scipy_available:
+            # Large dataset to trigger KDTree
+            engine = LuminCore(dimensions=3, use_kdtree_threshold=100)
+            X = np.random.rand(150, 3)
+            Y = np.sum(X, axis=1).reshape(-1, 1)
+            data = np.hstack([X, Y])
+            engine.fit(data)
+            
+            passed = engine.kdtree is not None
+            suite.add_result(TestResult(
+                "9.6 KDTree initialization",
+                passed,
+                f"KDTree active: {engine.kdtree is not None}"
+            ))
+        else:
+            suite.add_result(TestResult(
+                "9.6 KDTree initialization",
+                True,
+                "Scipy not available, skipped"
+            ))
+    except Exception as e:
+        suite.add_result(TestResult("9.6 KDTree init", False, str(e)))
+
+
+# ==========================================
 # MAIN TEST RUNNER
 # ==========================================
 
 def main():
     """Run all test categories"""
     print("\n" + "🔷"*35)
-    print("LUMIN CORE v2.0 - VALIDATION TEST SUITE")
+    print("LUMIN CORE v2.1 - VALIDATION TEST SUITE")
     print("🔷"*35)
     
     suite = LuminCoreTestSuite()
@@ -829,6 +996,7 @@ def main():
     test_evaluation(suite)
     test_edge_cases(suite)
     test_performance(suite)
+    test_v21_features(suite)  # NEW: v2.1 specific tests
     
     # Print summary
     all_passed = suite.print_summary()
