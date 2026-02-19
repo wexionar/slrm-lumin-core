@@ -1,7 +1,7 @@
 # ==========================================
 # Project: SLRM-nD (Lumin Core v2.1)
 # Comprehensive Test Suite
-# Project Lead: Alex Kinetic
+# Project Lead: Alex Kinetic 
 # AI Collaboration: Gemini · ChatGPT · Claude · Grok · Meta AI
 # License: MIT License
 # ==========================================
