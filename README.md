@@ -590,7 +590,7 @@ python lumin_core_test.py  # Ensure all tests pass
 
 ## 🧠 SLRM Team
 
-Alex · Gemini · ChatGPT   Claude · Grok · Meta AI  
+Alex · Gemini · ChatGPT · Claude · Grok · Meta AI  
 
 ---
 
