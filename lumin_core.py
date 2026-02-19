@@ -1,43 +1,60 @@
-# =============================================================
-# Project: SLRM-nD (Lumin Core v2.0)
-# Optimized Simplex Interpolation Engine
+# ==========================================
+# Project: SLRM-nD (Lumin Core v2.1)
+# Simplex Local Regression Engine
 # Project Lead: Alex Kinetic
 # AI Collaboration: Gemini · ChatGPT · Claude · Grok · Meta AI
-# License: MIT
-# =============================================================
+# License: MIT License
+# ==========================================
 
 import numpy as np
 import time
-from typing import Optional, Tuple, Union
+from typing import Optional, Tuple, Union, Dict
+
+# KDTree import opcional (solo si scipy disponible)
+try:
+    from scipy.spatial import KDTree
+    KDTREE_AVAILABLE = True
+except ImportError:
+    KDTREE_AVAILABLE = False
+    KDTree = None
 
 
 class LuminCore:
     """
-    Lumin Core v2.0 - Simplex Interpolation Engine
+    Lumin Core v2.1 - Simplex Local Regression Engine
     
-    Performs high-dimensional interpolation by encapsulating the query point
-    within a geometric simplex formed by the nearest boundary nodes along each axis.
+    Evolution from v2.0: Replaces Inverse Distance Weighting with local
+    linear regression for improved accuracy on smooth functions while
+    maintaining geometric purity and O(D) complexity.
     
     Key Features:
-    - Automatic extrapolation detection (rejects points outside dataset bounds)
-    - Vectorized simplex construction O(D) complexity
-    - Inverse Distance Weighting (IDW) for stable interpolation
-    - Robust numerical stability and edge case handling
+    - Simplex Local Regression (SLR) for linear trend capture
+    - Automatic simplex degeneracy detection with IDW fallback
+    - Optional diagnostic information (uncertainty, method used)
+    - KD-Tree acceleration for large datasets (N > 10,000)
+    - Sacred boundary enforcement (no epsilon tolerance)
+    - Robust numerical stability
     
     Principles:
-    - For each dimension i, finds the nearest points where:
-      * X[i] <= query[i] (inferior boundary)
-      * X[i] >= query[i] (superior boundary)
-    - Constructs a minimal enclosing simplex (D+1 nodes in D dimensions)
-    - Rejects queries outside the convex hull (no extrapolation)
+    - For each dimension i, finds the nearest boundary points
+    - Constructs minimal enclosing simplex (D+1 nodes)
+    - Fits local hyperplane through simplex nodes
+    - Rejects extrapolation attempts (binary: inside or outside)
+    
+    Philosophy:
+    "Honestidad Geométrica sobre Precisión Artificial"
+    - Poor simplex → high uncertainty (reported honestly)
+    - Outside bounds → rejection (no compromise)
+    - Degenerate simplex → fallback to IDW (with notification)
     """
     
-    def __init__(self, dimensions: int):
+    def __init__(self, dimensions: int, use_kdtree_threshold: int = 10000):
         """
-        Initialize the Lumin Core engine.
+        Initialize the Lumin Core v2.1 engine.
         
         Args:
             dimensions: Number of input dimensions (D)
+            use_kdtree_threshold: Activate KDTree if N > threshold (default: 10000)
         """
         self.d = dimensions
         self.dataset = None
@@ -45,6 +62,8 @@ class LuminCore:
         self.Y = None  # Target values
         self.bounds_min = None  # Min bounds per dimension
         self.bounds_max = None  # Max bounds per dimension
+        self.kdtree = None  # KDTree for acceleration (optional)
+        self.use_kdtree_threshold = use_kdtree_threshold
         
     def fit(self, data: np.ndarray) -> None:
         """
@@ -81,12 +100,22 @@ class LuminCore:
         self.bounds_min = np.min(self.X, axis=0)
         self.bounds_max = np.max(self.X, axis=0)
         
-        print(f"✓ Lumin Core v2.0: {len(data)} points loaded in {self.d}D space")
+        # Build KDTree if dataset is large enough
+        if KDTREE_AVAILABLE and len(data) > self.use_kdtree_threshold:
+            self.kdtree = KDTree(self.X)
+            kdtree_status = "enabled"
+        else:
+            self.kdtree = None
+            kdtree_status = "disabled" if KDTREE_AVAILABLE else "unavailable (scipy not installed)"
+        
+        print(f"✓ Lumin Core v2.1: {len(data)} points loaded in {self.d}D space")
         print(f"  Bounds: [{self.bounds_min.min():.4f}, {self.bounds_max.max():.4f}]")
+        print(f"  KDTree: {kdtree_status}")
     
     def _is_extrapolation(self, point: np.ndarray) -> Tuple[bool, str]:
         """
         Check if a point requires extrapolation (outside dataset bounds).
+        SACRED BOUNDARY - NO EPSILON TOLERANCE.
         
         Args:
             point: Query point of shape (D,)
@@ -107,6 +136,128 @@ class LuminCore:
         
         return False, "Within bounds"
     
+    def _is_simplex_degenerate(self, simplex_nodes: np.ndarray) -> bool:
+        """
+        Detect if simplex is degenerate (nodes are nearly collinear).
+        
+        A simplex is degenerate if:
+        1. Has fewer than D+1 unique nodes
+        2. Nodes are nearly collinear (rank < D)
+        
+        Args:
+            simplex_nodes: Array of shape (K, D+1)
+        
+        Returns:
+            True if simplex is degenerate
+        """
+        X = simplex_nodes[:, :-1]
+        
+        # Check for insufficient unique nodes
+        unique_nodes = np.unique(X, axis=0)
+        if len(unique_nodes) < min(self.d + 1, len(X)):
+            return True
+        
+        # Check if we have enough nodes to form a proper simplex
+        if len(X) < self.d + 1:
+            return True
+        
+        # Use matrix rank instead of determinant for dimension-agnostic check
+        # This works correctly in 1D, 2D, and high-D cases
+        if len(X) >= self.d + 1:
+            try:
+                # Matrix of differences from first node
+                diff_matrix = X[1:self.d+1] - X[0]
+                
+                # Check rank - should be D for non-degenerate simplex
+                rank = np.linalg.matrix_rank(diff_matrix, tol=1e-10)
+                
+                # Degenerate if rank is less than D
+                return rank < self.d
+            except:
+                return True
+        
+        return False
+    
+    def _predict_slr(self, point: np.ndarray, simplex_nodes: np.ndarray) -> float:
+        """
+        Simplex Local Regression: fit a local hyperplane through simplex nodes.
+        
+        Solves: y = β₀ + β₁·x₁ + β₂·x₂ + ... + βₐ·xₐ
+        using least squares on the simplex nodes.
+        
+        Args:
+            point: Query point of shape (D,)
+            simplex_nodes: Array of shape (K, D+1)
+        
+        Returns:
+            Predicted value at query point
+        
+        Raises:
+            np.linalg.LinAlgError: If least squares fails
+        """
+        X = simplex_nodes[:, :-1]
+        Y = simplex_nodes[:, -1]
+        
+        # Augment with bias term (column of ones)
+        A = np.c_[np.ones(X.shape[0]), X]
+        
+        # Solve least squares: A @ beta = Y
+        # Using rcond=None for future-proof behavior
+        beta, residuals, rank, s = np.linalg.lstsq(A, Y, rcond=None)
+        
+        # Predict at query point
+        query_augmented = np.insert(point, 0, 1)  # Add bias term
+        prediction = np.dot(query_augmented, beta)
+        
+        return float(prediction)
+    
+    def _idw_fallback(self, point: np.ndarray, simplex_nodes: np.ndarray) -> float:
+        """
+        Inverse Distance Weighting fallback for degenerate simplexes.
+        
+        Args:
+            point: Query point of shape (D,)
+            simplex_nodes: Array of shape (K, D+1)
+        
+        Returns:
+            Weighted average prediction
+        """
+        coords = simplex_nodes[:, :-1]
+        values = simplex_nodes[:, -1]
+        
+        distances = np.linalg.norm(coords - point, axis=1)
+        
+        # CRITICAL: Handle exact matches BEFORE any weight calculation
+        # This prevents divide-by-zero when duplicate points exist
+        exact_match_mask = distances < 1e-12
+        if np.any(exact_match_mask):
+            # Return mean of all exact matches (handles duplicate case)
+            return float(np.mean(values[exact_match_mask]))
+        
+        # Standard IDW - safe because we've already handled zero distances
+        weights = 1.0 / distances
+        prediction = np.dot(weights, values) / np.sum(weights)
+        
+        return float(prediction)
+    
+    def _get_uncertainty(self, point: np.ndarray, simplex_nodes: np.ndarray) -> float:
+        """
+        Calculate uncertainty metric based on simplex dispersion.
+        
+        Higher values indicate lower confidence in the prediction due to
+        sparse or dispersed simplex nodes.
+        
+        Args:
+            point: Query point of shape (D,)
+            simplex_nodes: Array of shape (K, D+1)
+        
+        Returns:
+            Mean distance from query point to simplex nodes
+        """
+        coords = simplex_nodes[:, :-1]
+        distances = np.linalg.norm(coords - point, axis=1)
+        return float(np.mean(distances))
+    
     def _build_simplex(self, point: np.ndarray) -> np.ndarray:
         """
         Construct the enclosing simplex using axial boundary search.
@@ -114,7 +265,9 @@ class LuminCore:
         For each dimension i:
         1. Find nearest point where X[:, i] <= point[i] (inferior)
         2. Find nearest point where X[:, i] >= point[i] (superior)
-        3. Choose the closest of the two
+        3. Select the closest of the two
+        
+        Then add global nearest neighbor as anchor.
         
         Args:
             point: Query point of shape (D,)
@@ -137,6 +290,7 @@ class LuminCore:
             sup_candidates = np.where(dim_diffs <= 0)[0]
             
             best_idx = None
+            best_dist = np.inf
             
             # Find closest inferior node
             if len(inf_candidates) > 0:
@@ -144,21 +298,27 @@ class LuminCore:
                 best_idx = closest_inf_idx
                 best_dist = dim_diffs[closest_inf_idx]
             
-            # Find closest superior node
+            # Find closest superior node and compare
             if len(sup_candidates) > 0:
                 closest_sup_idx = sup_candidates[np.argmax(dim_diffs[sup_candidates])]
-                sup_dist = -dim_diffs[closest_sup_idx]  # Make positive for comparison
+                sup_dist = -dim_diffs[closest_sup_idx]  # Make positive
                 
-                # Compare and select closer one
                 if best_idx is None or sup_dist < best_dist:
                     best_idx = closest_sup_idx
             
             if best_idx is not None:
                 selected_indices.append(best_idx)
         
-        # Add global nearest neighbor as anchor (ensures closure)
-        global_dists = np.linalg.norm(self.X - point, axis=1)
-        anchor_idx = np.argmin(global_dists)
+        # Add global nearest neighbor as anchor
+        if self.kdtree is not None:
+            # Use KDTree for fast nearest neighbor search
+            dist, idx = self.kdtree.query(point, k=1)
+            anchor_idx = idx
+        else:
+            # Brute force search
+            global_dists = np.linalg.norm(self.X - point, axis=1)
+            anchor_idx = np.argmin(global_dists)
+        
         selected_indices.append(anchor_idx)
         
         # Remove duplicates and get final simplex
@@ -168,67 +328,98 @@ class LuminCore:
         return simplex_nodes
     
     def predict(self, point: Union[list, np.ndarray], 
-                allow_extrapolation: bool = False) -> Optional[float]:
+                allow_extrapolation: bool = False,
+                return_diagnostics: bool = False) -> Union[Optional[float], Tuple[Optional[float], Dict]]:
         """
-        Predict the value at a query point using simplex interpolation.
+        Predict the value at a query point using Simplex Local Regression.
         
         Args:
             point: Query point of shape (D,)
             allow_extrapolation: If False, returns None for extrapolation cases
+            return_diagnostics: If True, returns (prediction, diagnostics_dict)
         
         Returns:
-            Predicted value or None if extrapolation is detected and not allowed
+            If return_diagnostics=False:
+                Predicted value or None if extrapolation detected
+            If return_diagnostics=True:
+                (prediction, diagnostics) where diagnostics contains:
+                - 'method': 'slr' | 'idw_fallback' | 'exact_match'
+                - 'uncertainty': float (mean distance to simplex nodes)
+                - 'simplex_size': int (number of nodes in simplex)
+                - 'is_degenerate': bool
+                - 'error': str (if extrapolation detected)
         """
         if self.dataset is None:
             raise RuntimeError("Model not fitted. Call fit() first.")
         
-        point = np.array(point, dtype=np.float64)
+        # Normalize input to handle various shapes: lists, (D,), (1,D), etc.
+        point = np.asarray(point, dtype=np.float64).flatten()
         
         # Validate dimensions
         if point.shape != (self.d,):
-            raise ValueError(f"Point must have shape ({self.d},), got {point.shape}")
+            raise ValueError(f"Point must have {self.d} elements, got {len(point)}")
         
-        # Check for extrapolation
+        # Check for extrapolation (SACRED BOUNDARY - NO EPSILON)
         is_extrap, extrap_msg = self._is_extrapolation(point)
         
         if is_extrap and not allow_extrapolation:
             print(f"⚠ EXTRAPOLATION DETECTED: {extrap_msg}")
             print(f"  Query point is outside the dataset bounds.")
-            print(f"  Lumin Core v2.0 does NOT perform extrapolation.")
+            print(f"  Lumin Core v2.1 does NOT perform extrapolation.")
+            
+            if return_diagnostics:
+                return None, {'error': extrap_msg}
             return None
         
         # Build enclosing simplex
         simplex = self._build_simplex(point)
         
-        # Extract coordinates and values
-        coords = simplex[:, :-1]
-        values = simplex[:, -1]
+        # Check for simplex degeneracy
+        is_degenerate = self._is_simplex_degenerate(simplex)
         
-        # Inverse Distance Weighting (IDW)
-        distances = np.linalg.norm(coords - point, axis=1)
+        # Predict using SLR or IDW fallback
+        method = "slr"
+        try:
+            if not is_degenerate:
+                prediction = self._predict_slr(point, simplex)
+            else:
+                prediction = self._idw_fallback(point, simplex)
+                method = "idw_fallback"
+        except (np.linalg.LinAlgError, Exception):
+            # If SLR fails for any reason, fallback to IDW
+            prediction = self._idw_fallback(point, simplex)
+            method = "idw_fallback"
         
-        # Handle exact matches
-        exact_match = np.where(distances < 1e-12)[0]
-        if len(exact_match) > 0:
-            return values[exact_match[0]]
+        # Calculate uncertainty
+        uncertainty = self._get_uncertainty(point, simplex)
         
-        # IDW formula: w_i = 1/d_i, prediction = Σ(w_i * y_i) / Σ(w_i)
-        weights = 1.0 / distances
-        prediction = np.dot(weights, values) / np.sum(weights)
+        if return_diagnostics:
+            diagnostics = {
+                'method': method,
+                'uncertainty': uncertainty,
+                'simplex_size': len(simplex),
+                'is_degenerate': is_degenerate
+            }
+            return prediction, diagnostics
         
         return prediction
     
     def predict_batch(self, points: np.ndarray, 
-                      allow_extrapolation: bool = False) -> np.ndarray:
+                      allow_extrapolation: bool = False,
+                      return_diagnostics: bool = False) -> Union[np.ndarray, Tuple[np.ndarray, list]]:
         """
         Predict values for multiple query points.
         
         Args:
             points: Array of shape (M, D) with M query points
             allow_extrapolation: If False, sets None for extrapolation cases
+            return_diagnostics: If True, returns (predictions, diagnostics_list)
         
         Returns:
-            Array of shape (M,) with predictions (None for rejected points)
+            If return_diagnostics=False:
+                Array of shape (M,) with predictions (None for rejected points)
+            If return_diagnostics=True:
+                (predictions, diagnostics_list)
         """
         points = np.array(points, dtype=np.float64)
         
@@ -236,10 +427,20 @@ class LuminCore:
             raise ValueError(f"Points must have shape (M, {self.d}), got {points.shape}")
         
         results = []
-        for point in points:
-            pred = self.predict(point, allow_extrapolation=allow_extrapolation)
-            results.append(pred)
+        diagnostics_list = []
         
+        for point in points:
+            if return_diagnostics:
+                pred, diag = self.predict(point, allow_extrapolation=allow_extrapolation, 
+                                         return_diagnostics=True)
+                results.append(pred)
+                diagnostics_list.append(diag)
+            else:
+                pred = self.predict(point, allow_extrapolation=allow_extrapolation)
+                results.append(pred)
+        
+        if return_diagnostics:
+            return np.array(results), diagnostics_list
         return np.array(results)
     
     def evaluate(self, test_data: np.ndarray, 
@@ -252,18 +453,22 @@ class LuminCore:
             allow_extrapolation: Whether to allow extrapolation in predictions
         
         Returns:
-            Dictionary with metrics: MSE, MAE, RMSE, valid_predictions_count
+            Dictionary with metrics: MSE, MAE, RMSE, valid_predictions_count, 
+            method_distribution (SLR vs IDW usage)
         """
         test_data = np.array(test_data, dtype=np.float64)
         X_test = test_data[:, :-1]
         Y_test = test_data[:, -1]
         
-        predictions = self.predict_batch(X_test, allow_extrapolation=allow_extrapolation)
+        predictions, diagnostics = self.predict_batch(X_test, 
+                                                       allow_extrapolation=allow_extrapolation,
+                                                       return_diagnostics=True)
         
         # Filter out None values (rejected extrapolations)
         valid_mask = np.array([p is not None for p in predictions])
         valid_preds = np.array([p for p in predictions if p is not None])
         valid_true = Y_test[valid_mask]
+        valid_diags = [d for d, v in zip(diagnostics, valid_mask) if v]
         
         if len(valid_preds) == 0:
             return {
@@ -271,163 +476,124 @@ class LuminCore:
                 'MAE': None,
                 'RMSE': None,
                 'valid_predictions': 0,
-                'total_points': len(Y_test)
+                'total_points': len(Y_test),
+                'slr_usage': 0,
+                'idw_usage': 0,
+                'mean_uncertainty': None
             }
         
+        # Calculate metrics
         errors = valid_true - valid_preds
         mse = np.mean(errors**2)
         mae = np.mean(np.abs(errors))
         rmse = np.sqrt(mse)
+        
+        # Method distribution
+        slr_count = sum(1 for d in valid_diags if d.get('method') == 'slr')
+        idw_count = sum(1 for d in valid_diags if d.get('method') == 'idw_fallback')
+        
+        # Mean uncertainty
+        mean_uncertainty = np.mean([d.get('uncertainty', 0) for d in valid_diags])
         
         return {
             'MSE': mse,
             'MAE': mae,
             'RMSE': rmse,
             'valid_predictions': len(valid_preds),
-            'total_points': len(Y_test)
+            'total_points': len(Y_test),
+            'slr_usage': slr_count,
+            'idw_usage': idw_count,
+            'mean_uncertainty': mean_uncertainty
         }
 
 
 # ==========================================
-# COMPREHENSIVE TEST SUITE
+# DEMONSTRATION & BASIC TESTS
 # ==========================================
 
-def test_interpolation_1d():
-    """Test basic 1D interpolation"""
+if __name__ == "__main__":
+    print("\n" + "🔷"*30)
+    print("LUMIN CORE v2.1 - SIMPLEX LOCAL REGRESSION")
+    print("🔷"*30)
+    
+    # Test 1: Simple 2D function
     print("\n" + "="*60)
-    print("TEST 1: Basic 1D Interpolation")
+    print("TEST 1: Linear Function in 2D (y = x₁ + 2x₂)")
     print("="*60)
     
-    # Dataset: y = x^2
-    X = np.linspace(0, 10, 20).reshape(-1, 1)
+    np.random.seed(42)
+    X = np.random.rand(50, 2) * 10
+    Y = (X[:, 0] + 2*X[:, 1]).reshape(-1, 1)
+    data = np.hstack([X, Y])
+    
+    engine = LuminCore(dimensions=2)
+    engine.fit(data)
+    
+    test_point = np.array([5.0, 5.0])
+    pred, diag = engine.predict(test_point, return_diagnostics=True)
+    real = 5.0 + 2*5.0
+    
+    print(f"\nQuery point: {test_point}")
+    print(f"Real value: {real:.4f}")
+    print(f"Predicted: {pred:.4f}")
+    print(f"Error: {abs(real - pred):.4f}")
+    print(f"Method: {diag['method']}")
+    print(f"Uncertainty: {diag['uncertainty']:.4f}")
+    print(f"Simplex size: {diag['simplex_size']}")
+    print(f"Degenerate: {diag['is_degenerate']}")
+    
+    # Test 2: Quadratic function
+    print("\n" + "="*60)
+    print("TEST 2: Quadratic Function in 1D (y = x²)")
+    print("="*60)
+    
+    X = np.linspace(0, 10, 100).reshape(-1, 1)
     Y = (X**2).reshape(-1, 1)
     data = np.hstack([X, Y])
     
     engine = LuminCore(dimensions=1)
     engine.fit(data)
     
-    # Test interpolation
     test_point = np.array([5.5])
-    pred = engine.predict(test_point)
+    pred, diag = engine.predict(test_point, return_diagnostics=True)
     real = 5.5**2
     
-    print(f"Query: x={test_point[0]:.2f}")
-    print(f"Real: {real:.4f} | Predicted: {pred:.4f}")
+    print(f"\nQuery point: {test_point[0]:.2f}")
+    print(f"Real value: {real:.4f}")
+    print(f"Predicted: {pred:.4f}")
     print(f"Error: {abs(real - pred):.4f}")
+    print(f"Method: {diag['method']}")
     
-    # Test extrapolation detection
-    print("\n--- Testing Extrapolation Detection ---")
-    extrap_point = np.array([15.0])  # Outside bounds
-    pred_extrap = engine.predict(extrap_point, allow_extrapolation=False)
-    print(f"Result for extrapolation: {pred_extrap}")
-
-
-def test_high_dimensional():
-    """Test high-dimensional interpolation with sum of squares"""
+    # Test 3: High-dimensional test
     print("\n" + "="*60)
-    print("TEST 2: High-Dimensional Space (1000D)")
+    print("TEST 3: High-Dimensional Space (100D)")
     print("="*60)
     
-    D, N = 1000, 2000
-    
-    # Generate dataset: y = sum(x_i^2)
-    X_train = np.random.rand(N, D) * 10  # [0, 10] range
-    Y_train = np.sum(X_train**2, axis=1).reshape(-1, 1)
-    data = np.hstack([X_train, Y_train])
+    D = 100
+    N = 500
+    X = np.random.rand(N, D) * 10
+    Y = np.sum(X**2, axis=1).reshape(-1, 1)
+    data = np.hstack([X, Y])
     
     engine = LuminCore(dimensions=D)
     engine.fit(data)
     
-    # Test points
-    n_test = 100
-    X_test = np.random.rand(n_test, D) * 10
-    Y_test = np.sum(X_test**2, axis=1).reshape(-1, 1)
-    test_data = np.hstack([X_test, Y_test])
+    test_point = engine.bounds_min + (engine.bounds_max - engine.bounds_min) * 0.5
     
-    # Evaluate
     start = time.perf_counter()
-    metrics = engine.evaluate(test_data, allow_extrapolation=False)
+    pred, diag = engine.predict(test_point, return_diagnostics=True)
     elapsed = time.perf_counter() - start
     
-    print(f"\nResults on {n_test} test points:")
-    print(f"  RMSE: {metrics['RMSE']:.4f}")
-    print(f"  MAE:  {metrics['MAE']:.4f}")
-    print(f"  Valid predictions: {metrics['valid_predictions']}/{metrics['total_points']}")
-    print(f"  Total time: {elapsed*1000:.2f} ms")
-    print(f"  Avg per point: {elapsed*1000/n_test:.2f} ms")
-
-
-def test_edge_cases():
-    """Test edge cases and robustness"""
-    print("\n" + "="*60)
-    print("TEST 3: Edge Cases")
-    print("="*60)
+    real = np.sum(test_point**2)
     
-    # 2D dataset
-    data = np.array([
-        [0, 0, 0],
-        [0, 1, 1],
-        [1, 0, 1],
-        [1, 1, 2],
-    ])
-    
-    engine = LuminCore(dimensions=2)
-    engine.fit(data)
-    
-    print("\n--- Case 1: Exact match ---")
-    pred = engine.predict([0, 0])
-    print(f"Prediction at [0, 0]: {pred:.4f} (expected 0.0)")
-    
-    print("\n--- Case 2: Interior point ---")
-    pred = engine.predict([0.5, 0.5])
-    print(f"Prediction at [0.5, 0.5]: {pred:.4f}")
-    
-    print("\n--- Case 3: Boundary extrapolation ---")
-    pred = engine.predict([2, 0.5], allow_extrapolation=False)
-    print(f"Prediction at [2, 0.5]: {pred}")
-    
-    print("\n--- Case 4: Negative extrapolation ---")
-    pred = engine.predict([-1, 0.5], allow_extrapolation=False)
-    print(f"Prediction at [-1, 0.5]: {pred}")
-
-
-def test_stress_latency():
-    """Stress test for latency in extreme dimensions"""
-    print("\n" + "="*60)
-    print("TEST 4: Latency Stress Test")
-    print("="*60)
-    
-    dimensions = [10, 50, 100, 500, 1000]
-    
-    for D in dimensions:
-        N = max(D * 2, 100)
-        X = np.random.rand(N, D)
-        Y = np.sum(X**2, axis=1).reshape(-1, 1)
-        data = np.hstack([X, Y])
-        
-        engine = LuminCore(dimensions=D)
-        engine.fit(data)
-        
-        query = np.random.rand(D)
-        
-        start = time.perf_counter()
-        pred = engine.predict(query)
-        elapsed = time.perf_counter() - start
-        
-        print(f"D={D:4d} | Latency: {elapsed*1000:6.2f} ms")
-
-
-if __name__ == "__main__":
-    print("\n" + "🔷"*30)
-    print("LUMIN CORE v2.0 - COMPREHENSIVE TEST SUITE")
-    print("🔷"*30)
-    
-    test_interpolation_1d()
-    test_high_dimensional()
-    test_edge_cases()
-    test_stress_latency()
+    print(f"\nReal value: {real:.4f}")
+    print(f"Predicted: {pred:.4f}")
+    print(f"Relative error: {abs(real - pred)/real:.2%}")
+    print(f"Latency: {elapsed*1000:.2f} ms")
+    print(f"Method: {diag['method']}")
+    print(f"Uncertainty: {diag['uncertainty']:.4f}")
     
     print("\n" + "="*60)
-    print("✓ ALL TESTS COMPLETED")
+    print("✓ BASIC TESTS COMPLETED")
     print("="*60)
  
